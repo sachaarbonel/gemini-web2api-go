@@ -3,7 +3,6 @@ package app
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -110,6 +109,9 @@ func sanitizeUploadName(name string) string {
 // uploadPost 走跟主请求相同的出口发 POST，响应头一起带回（start 要取 x-goog-upload-url）。
 func uploadPost(url string, headers map[string]string, body []byte, proxyURL string) (
 	int, map[string]string, []byte, error) {
+	if _, err := trustedGoogleURL(url, "push.clients6.google.com", "gemini.google.com"); err != nil {
+		return 0, nil, nil, err
+	}
 	if proxyURL != "" {
 		req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 		if err != nil {
@@ -124,7 +126,7 @@ func uploadPost(url string, headers map[string]string, body []byte, proxyURL str
 			return 0, nil, nil, err
 		}
 		defer resp.Body.Close()
-		b, err := io.ReadAll(resp.Body)
+		b, err := readBounded(resp.Body, maxArtifactBytes)
 		h := map[string]string{}
 		for k := range resp.Header {
 			h[strings.ToLower(k)] = resp.Header.Get(k)
@@ -143,7 +145,7 @@ func uploadPost(url string, headers map[string]string, body []byte, proxyURL str
 		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
+	b, err := readBounded(resp.Body, maxArtifactBytes)
 	h := map[string]string{}
 	for k := range resp.Header {
 		h[strings.ToLower(k)] = resp.Header.Get(k)

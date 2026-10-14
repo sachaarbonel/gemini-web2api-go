@@ -9,6 +9,9 @@ data/
 *.db-shm
 *.db-wal
 cookie.txt
+admin-token
+config.json
+config.local.json
 *.log
 tmp_*
 

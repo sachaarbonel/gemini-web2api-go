@@ -131,7 +131,7 @@ func getDB() *dbx {
 				path = "./data/gemini.db"
 			}
 			sqliteDir = filepath.Dir(path)
-			if err := os.MkdirAll(sqliteDir, 0o755); err != nil {
+			if err := preparePrivateDatabase(path); err != nil {
 				fmt.Fprintf(os.Stderr, "[db] 建目录 %s 失败: %v\n%s", sqliteDir, err, dbPermHint(sqliteDir))
 				os.Exit(1)
 			}
@@ -218,10 +218,16 @@ func insertRequest(r *RequestRow) {
 
 // Sessions ───────────────────────────────────────────────────────────────────
 
+// Persist a digest, not the bearer cookie. Binding it to the configured admin
+// token also invalidates existing sessions when that token is changed.
+func sessionKey(token string) string {
+	return hashStr(cfg.AdminToken + "\x00" + token)
+}
+
 func createSession(token string, ttl time.Duration) {
 	now := time.Now().Unix()
 	_, err := getDB().Exec(upsert("sessions", []string{"token", "created_at", "expires_at"}, []string{"token"}),
-		token, now, now+int64(ttl.Seconds()))
+		sessionKey(token), now, now+int64(ttl.Seconds()))
 	if err != nil {
 		logf("[db] session insert failed: %v", err)
 	}
@@ -232,7 +238,7 @@ func validSession(token string) bool {
 		return false
 	}
 	var exp int64
-	err := getDB().QueryRow(`SELECT expires_at FROM sessions WHERE token=?`, token).Scan(&exp)
+	err := getDB().QueryRow(`SELECT expires_at FROM sessions WHERE token=?`, sessionKey(token)).Scan(&exp)
 	if err != nil {
 		return false
 	}

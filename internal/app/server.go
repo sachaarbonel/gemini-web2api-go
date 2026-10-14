@@ -3,7 +3,6 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,7 +13,6 @@ const Version = "4.22.0"
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	body, _ := json.Marshal(data)
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(status)
 	w.Write(body)
 }
@@ -216,9 +214,8 @@ func recordRequest(endpoint, model, prompt, response string, res *StreamResult, 
 }
 
 func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{"message": err.Error()}})
+	body, ok := readRequestBody(w, r, maxAPIBodyBytes)
+	if !ok {
 		return
 	}
 	var req map[string]interface{}
@@ -435,9 +432,8 @@ func remainingOf(full, emitted string) string {
 
 // handleResponses implements OpenAI's /v1/responses (Codex CLI format).
 func handleResponses(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{"message": err.Error()}})
+	body, ok := readRequestBody(w, r, maxAPIBodyBytes)
+	if !ok {
 		return
 	}
 	var req map[string]interface{}

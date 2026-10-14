@@ -1,10 +1,9 @@
 services:
   gemini-web2api:
-    # 默认拉现成镜像，不需要源码——把这个文件单独下下来就能跑。
-    # 想从源码构建（改了代码、或者要自己审一遍）就把下面 build 那两行的注释去掉。
-    image: ghcr.io/zexadev/gemini-web2api-go:latest
-    # build:
-    #   context: .
+    # Build this checkout so the local security fixes are included.
+    image: gemini-web2api:local
+    build:
+      context: .
     container_name: gemini-web2api
     restart: unless-stopped
 
@@ -33,16 +32,17 @@ services:
       # - ./cookie.txt:/app/cookie.txt:ro         # 可选：启动时把这个文件导入 Cookie 池
 
     environment:
-      # 面板登录 token。留空 = 面板不鉴权，只有在绑定 127.0.0.1 时才可接受。
-      ADMIN_TOKEN: "${ADMIN_TOKEN:-change-me-in-production}"
+      # Empty generates a random token in /data/admin-token (mode 0600).
+      # An explicit token must have at least 32 characters.
+      ADMIN_TOKEN: "${ADMIN_TOKEN:-}"
       # 可选：锁定 /v1/* 的 API key，设了之后面板改不了。
       # 不设则首次启动自动生成，在面板里轮换。
       # API_KEY: "sk-gemini-your-key"
       TZ: "${TZ:-UTC}"
 
-    # 镜像自带 CMD ["--db","/data/gemini.db","--port","8083"]，一般不用改。
+    # The container listens on 0.0.0.0; the published host port stays loopback-only.
     # 只有要加参数时才写 command，写了就会整个覆盖掉默认值，别漏 --db。
-    # command: ["--db", "/data/gemini.db", "--port", "8083", "--cookie-file", "/app/cookie.txt"]
+    # command: ["--db", "/data/gemini.db", "--host", "0.0.0.0", "--port", "8083", "--cookie-file", "/app/cookie.txt"]
 
     healthcheck:
       test: ["CMD", "/app/gemini-web2api", "--version"]

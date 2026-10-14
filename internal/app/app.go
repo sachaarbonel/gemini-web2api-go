@@ -32,12 +32,14 @@ func maskKey(k string) string {
 // Run 是进程入口，由根目录的 main.go 调用。
 func Run() {
 	port := flag.Int("port", 0, "listening port (default: 8083 or config.json)")
+	host := flag.String("host", "", "listening address (default: 127.0.0.1 or config.json)")
+	apiPrefix := flag.String("api-prefix", "", "additional API path prefix, e.g. /google exposes /google/v1/* (no admin routes)")
 	configPath := flag.String("config", "", "path to config.json")
 	cookieFile := flag.String("cookie-file", "", "path to cookie file")
 	proxy := flag.String("proxy", "", "HTTP proxy fallback when proxy pool is empty")
 	impersonate := flag.String("impersonate", "", "TLS profile (chrome_146, chrome_133, firefox_147, ...)")
 	dbPath := flag.String("db", "", "SQLite path (default: ./data/gemini.db)")
-	adminToken := flag.String("admin-token", "", "admin token (empty = no auth, only safe on 127.0.0.1)")
+	adminToken := flag.String("admin-token", "", "admin token (32+ characters; empty = generate a private token file)")
 	apiKey := flag.String("api-key", "", "API key for /v1/* (locked). Empty = use kv-table key (auto-gen on first boot, mutable from admin UI)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -53,6 +55,16 @@ func Run() {
 	}
 	if *port > 0 {
 		cfg.Port = *port
+	}
+	if *host != "" {
+		cfg.Host = *host
+	}
+	if *apiPrefix != "" {
+		cfg.APIPrefix = *apiPrefix
+	}
+	if err := validateAPIPrefix(cfg.APIPrefix); err != nil {
+		fmt.Fprintf(os.Stderr, "API prefix configuration error: %v\n", err)
+		os.Exit(1)
 	}
 	if *cookieFile != "" {
 		cfg.CookieFile = *cookieFile
@@ -71,6 +83,11 @@ func Run() {
 	}
 	if envTok := os.Getenv("ADMIN_TOKEN"); envTok != "" && cfg.AdminToken == "" {
 		cfg.AdminToken = envTok
+	}
+	adminTokenPath, err := initAdminToken()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "admin token setup failed: %v\n", err)
+		os.Exit(1)
 	}
 
 	// boot DB and load proxy pool
@@ -149,10 +166,13 @@ func Run() {
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	server := &http.Server{
-		Addr:         addr,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0, // streaming responses can be long
+		Addr:              addr,
+		Handler:           apiPrefixHandler(secureHandler(mux), cfg.APIPrefix),
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 << 10,
+		WriteTimeout:      0, // streaming responses can be long
 	}
 
 	cookieStatus := "none (anonymous)"
@@ -172,14 +192,16 @@ func Run() {
 	fmt.Printf("gemini-web2api-go v%s\n", Version)
 	fmt.Printf("  Listening:   http://%s\n", addr)
 	fmt.Printf("  Base URL:    http://localhost:%d/v1\n", cfg.Port)
+	if cfg.APIPrefix != "" {
+		fmt.Printf("  API alias:   http://localhost:%d%s/v1\n", cfg.Port, cfg.APIPrefix)
+	}
 	fmt.Printf("  API key:     %s%s\n", maskKey(resolvedAPIKey),
 		map[bool]string{true: "  (locked by flag/env)", false: "  (mutable in admin UI)"}[apiKeyLocked])
 	if cfg.AdminEnabled {
-		authMode := "no auth (open)"
-		if cfg.AdminToken != "" {
-			authMode = "token auth"
+		fmt.Printf("  Admin UI:    http://localhost:%d/admin  (token auth)\n", cfg.Port)
+		if adminTokenPath != "" {
+			fmt.Printf("  Admin token: %s (private file)\n", adminTokenPath)
 		}
-		fmt.Printf("  Admin UI:    http://localhost:%d/admin  (%s)\n", cfg.Port, authMode)
 	}
 	fmt.Printf("  DB:          %s\n", cfg.DBPath)
 	fmt.Printf("  Models:      %v\n", modelNames)

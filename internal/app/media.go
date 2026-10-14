@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -282,7 +281,9 @@ func pollHistoryRaw(cid, cookie, sapisid, xsrf, proxyURL string) (string, error)
 // deleteConversation 删掉 gemini.google.com 上留下的一条会话（#19）。
 //
 // 协议逐字取自抓包：rpc GzXR5e，参数 ["<cid>"]，mode "generic"，带 at=XSRF。
-//   f.req=[[["GzXR5e","[\"c_xxx\"]",null,"generic"]]]&at=<xsrf>
+//
+//	f.req=[[["GzXR5e","[\"c_xxx\"]",null,"generic"]]]&at=<xsrf>
+//
 // 只登录态可用（匿名没有 XSRF、会话也没落到账号里）。best-effort：删失败只记日志，
 // 不影响已经返给客户端的响应。
 func deleteConversation(cid, cookie, sapisid, xsrf, proxyURL string) {
@@ -366,7 +367,8 @@ func walkFramesForURLs(raw string, want func(string) bool) []string {
 // collectDownloadURLs 从响应里挖出所有 contribution 下载链（音乐/视频用）。
 func collectDownloadURLs(raw string) []string {
 	return walkFramesForURLs(raw, func(s string) bool {
-		return strings.Contains(s, "contribution.usercontent.google.com/download")
+		u, err := trustedGoogleURL(s, "contribution.usercontent.google.com")
+		return err == nil && u.Path == "/download"
 	})
 }
 
@@ -375,8 +377,8 @@ func collectDownloadURLs(raw string) []string {
 // 拿本链的 token 拼 rd- 会 400）。
 func collectImageURLs(raw string) []string {
 	return walkFramesForURLs(raw, func(s string) bool {
-		return strings.Contains(s, "lh3.googleusercontent.com/gg-dl/") ||
-			strings.Contains(s, "lh3.googleusercontent.com/gg/")
+		u, err := trustedGoogleURL(s, "lh3.googleusercontent.com")
+		return err == nil && (strings.HasPrefix(u.Path, "/gg-dl/") || strings.HasPrefix(u.Path, "/gg/"))
 	})
 }
 
@@ -439,11 +441,8 @@ func downloadBytes(rawURL, cookie, proxyURL, defaultMime string) (string, []byte
 	return mime, body, nil
 }
 
-// mediaGetFollow 手动跟随重定向（最多 6 跳），每跳都把同一套 header（含 Cookie）重发。
-//
-// 为什么不用客户端自带的跟随：图片链会跨域 302（lh3 → work.fife.usercontent.google.com），
-// http 客户端出于安全默认不把 Cookie 头带到新域，于是重定向目标拿不到 cookie 就 403。
-// 手动跟随、每跳重发 cookie 才能过。两个 client 本来也都配了「不自动跟随」。
+// Follow only the explicitly trusted Google HTTPS media hosts. mediaGetOnce
+// validates every hop before attaching cookies, including redirect targets.
 func mediaGetFollow(rawURL string, headers map[string]string, proxyURL string) (int, map[string]string, []byte, error) {
 	cur := rawURL
 	for hop := 0; hop < 6; hop++ {
@@ -484,6 +483,9 @@ func resolveRef(base, ref string) (string, error) {
 // mediaGetOnce 发一次 GET，不跟随重定向，响应头一起带回（要取 content-type / location）。
 // 有代理走 stdlib，没代理走 tls-client，跟 doGeminiRequest / uploadPost 一个规矩。
 func mediaGetOnce(rawURL string, headers map[string]string, proxyURL string) (int, map[string]string, []byte, error) {
+	if _, err := trustedMediaURL(rawURL); err != nil {
+		return 0, nil, nil, err
+	}
 	if proxyURL != "" {
 		req, err := http.NewRequest("GET", rawURL, nil)
 		if err != nil {
@@ -498,7 +500,7 @@ func mediaGetOnce(rawURL string, headers map[string]string, proxyURL string) (in
 			return 0, nil, nil, err
 		}
 		defer resp.Body.Close()
-		b, err := io.ReadAll(resp.Body)
+		b, err := readBounded(resp.Body, maxArtifactBytes)
 		return resp.StatusCode, flattenHeaders(resp.Header), b, err
 	}
 	req, err := fhttp.NewRequest("GET", rawURL, nil)
@@ -513,7 +515,7 @@ func mediaGetOnce(rawURL string, headers map[string]string, proxyURL string) (in
 		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
+	b, err := readBounded(resp.Body, maxArtifactBytes)
 	return resp.StatusCode, flattenFHeaders(resp.Header), b, err
 }
 

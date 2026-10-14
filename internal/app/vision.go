@@ -3,11 +3,9 @@ package app
 import (
 	"encoding/base64"
 	"fmt"
-	"io"
+	"mime"
 	"net/http"
 	"strings"
-
-	fhttp "github.com/bogdanfinn/fhttp"
 )
 
 // 读图 / 读视频：把客户端传来的图片或视频上传成附件，再在对话里引用。
@@ -41,6 +39,7 @@ type pendingUpload struct {
 // 是不行的，它只认自己存储里的附件。
 func collectImages(messages []map[string]interface{}, proxyURL string) ([]pendingUpload, error) {
 	var out []pendingUpload
+	totalBytes := 0
 	for _, m := range messages {
 		parts, ok := m["content"].([]interface{})
 		if !ok {
@@ -75,9 +74,16 @@ func collectImages(messages []map[string]interface{}, proxyURL string) ([]pendin
 			if strings.TrimSpace(src) == "" {
 				continue
 			}
+			if len(out) >= maxAttachments {
+				return nil, fmt.Errorf("too many attachments (maximum %d)", maxAttachments)
+			}
 			img, err := materializeImage(src, proxyURL, len(out)+1)
 			if err != nil {
 				return nil, err
+			}
+			totalBytes += len(img.Data)
+			if totalBytes > maxAttachmentBytes {
+				return nil, fmt.Errorf("attachments exceed the total size limit")
 			}
 			out = append(out, img)
 		}
@@ -118,6 +124,13 @@ func decodeDataURL(src string, idx int) (pendingUpload, error) {
 	} else if meta != "" {
 		mime = meta
 	}
+	limit := maxImageBytes
+	if strings.HasPrefix(mime, "video/") {
+		limit = maxVideoBytes
+	}
+	if len(payload) > base64.StdEncoding.EncodedLen(limit) {
+		return pendingUpload{}, fmt.Errorf("media %d: data URL exceeds size limit", idx)
+	}
 	var data []byte
 	var err error
 	if strings.Contains(meta, "base64") {
@@ -131,54 +144,39 @@ func decodeDataURL(src string, idx int) (pendingUpload, error) {
 	return newMediaUpload(data, mime, idx)
 }
 
-// fetchImage 下载远程图片。走跟正式请求同一个出口：图从别的 IP 拉、对话从这个 IP 发，
-// 除了慢一点没别的好处，还多暴露一个出口。
+// Fetch untrusted input through a credential-free transport that pins DNS to
+// verified public IPs. Proxies must not resolve these URLs on our behalf.
 func fetchImage(src, proxyURL string, idx int) (pendingUpload, error) {
-	var body []byte
-	var ctype string
 	if proxyURL != "" {
-		req, err := http.NewRequest("GET", src, nil)
-		if err != nil {
-			return pendingUpload{}, err
-		}
-		applyChromeHeaders(req)
-		resp, err := getStdlibClient(proxyURL).Do(req)
-		if err != nil {
-			return pendingUpload{}, fmt.Errorf("image %d: fetch failed: %w", idx, err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			return pendingUpload{}, fmt.Errorf("image %d: fetch returned HTTP %d", idx, resp.StatusCode)
-		}
-		ctype = resp.Header.Get("Content-Type")
-		body, err = io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
-		if err != nil {
-			return pendingUpload{}, err
-		}
-	} else {
-		req, err := fhttp.NewRequest("GET", src, nil)
-		if err != nil {
-			return pendingUpload{}, err
-		}
-		resp, err := getTLSClient().Do(req)
-		if err != nil {
-			return pendingUpload{}, fmt.Errorf("image %d: fetch failed: %w", idx, err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			return pendingUpload{}, fmt.Errorf("image %d: fetch returned HTTP %d", idx, resp.StatusCode)
-		}
-		ctype = resp.Header.Get("Content-Type")
-		body, err = io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
-		if err != nil {
-			return pendingUpload{}, err
-		}
+		return pendingUpload{}, fmt.Errorf("remote image downloads through a proxy are not supported; use a data URL")
 	}
-	if i := strings.Index(ctype, ";"); i > 0 {
-		ctype = ctype[:i]
+	u, err := publicMediaURL(src)
+	if err != nil {
+		return pendingUpload{}, err
 	}
-	if !strings.HasPrefix(ctype, "image/") && !strings.HasPrefix(ctype, "video/") {
-		ctype = "image/png"
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return pendingUpload{}, err
+	}
+	resp, err := publicMediaClient.Do(req)
+	if err != nil {
+		return pendingUpload{}, fmt.Errorf("image %d: fetch failed: %w", idx, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return pendingUpload{}, fmt.Errorf("image %d: fetch returned HTTP %d", idx, resp.StatusCode)
+	}
+	ctype, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || (!strings.HasPrefix(ctype, "image/") && !strings.HasPrefix(ctype, "video/")) {
+		return pendingUpload{}, fmt.Errorf("image %d: response is not an image or video", idx)
+	}
+	limit := int64(maxImageBytes)
+	if strings.HasPrefix(ctype, "video/") {
+		limit = maxVideoBytes
+	}
+	body, err := readBounded(resp.Body, limit)
+	if err != nil {
+		return pendingUpload{}, err
 	}
 	return newMediaUpload(body, ctype, idx)
 }
@@ -186,6 +184,7 @@ func fetchImage(src, proxyURL string, idx int) (pendingUpload, error) {
 // newMediaUpload 按 mime 决定这是图片还是视频：
 //   - video/* → 附件类型位 2（跟抓包一致：文件元组 [路径,2,null,"video/mp4"]），上限 maxVideoBytes；
 //   - 其余当图片 → 类型位 1，上限 maxImageBytes。
+//
 // 类型位 1/2 是服务端认媒体种类的开关，填错模型就按错的类型解析附件。
 func newMediaUpload(data []byte, mime string, idx int) (pendingUpload, error) {
 	if len(data) == 0 {

@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -27,21 +26,15 @@ func newSessionToken() string {
 // authOK accepts either:
 //  1. Cookie gemini_admin_session matching a valid sessions row
 //  2. Authorization: Bearer <admin_token>
-//  3. ?token=<admin_token> query param (for embedded HTML <a href> use)
 func authOK(r *http.Request) bool {
 	if cfg.AdminToken == "" {
-		return true // unauthenticated mode (only safe behind 127.0.0.1)
+		return false
 	}
 	if c, err := r.Cookie(sessionCookieName); err == nil && validSession(c.Value) {
 		return true
 	}
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		if subtle.ConstantTimeCompare([]byte(h[7:]), []byte(cfg.AdminToken)) == 1 {
-			return true
-		}
-	}
-	if t := r.URL.Query().Get("token"); t != "" {
-		if subtle.ConstantTimeCompare([]byte(t), []byte(cfg.AdminToken)) == 1 {
 			return true
 		}
 	}
@@ -59,9 +52,12 @@ func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeJSON(w, 400, map[string]string{"error": "bad body"})
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	body, ok := readRequestBody(w, r, maxLoginBodyBytes)
+	if !ok {
 		return
 	}
 	var req struct {
@@ -71,7 +67,7 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "bad json"})
 		return
 	}
-	if cfg.AdminToken != "" && subtle.ConstantTimeCompare([]byte(req.Token), []byte(cfg.AdminToken)) != 1 {
+	if cfg.AdminToken == "" || subtle.ConstantTimeCompare([]byte(req.Token), []byte(cfg.AdminToken)) != 1 {
 		writeJSON(w, 401, map[string]string{"error": "invalid token"})
 		return
 	}
@@ -83,14 +79,19 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteLaxMode,
 	})
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
 func handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
 	if c, err := r.Cookie(sessionCookieName); err == nil {
-		_, _ = getDB().Exec(`DELETE FROM sessions WHERE token=?`, c.Value)
+		_, _ = getDB().Exec(`DELETE FROM sessions WHERE token=?`, sessionKey(c.Value))
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1})
 	writeJSON(w, 200, map[string]bool{"ok": true})
@@ -371,7 +372,10 @@ func handleAdminProxies(w http.ResponseWriter, r *http.Request) {
 			URL    string `json:"url"`
 			Weight int    `json:"weight"`
 		}
-		body, _ := io.ReadAll(r.Body)
+		body, ok := readRequestBody(w, r, maxAdminBodyBytes)
+		if !ok {
+			return
+		}
 		if err := json.Unmarshal(body, &p); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "bad json"})
 			return
@@ -446,7 +450,10 @@ func handleAdminProxyItem(w http.ResponseWriter, r *http.Request) {
 			Weight  *int   `json:"weight"`
 			Enabled *bool  `json:"enabled"`
 		}
-		body, _ := io.ReadAll(r.Body)
+		body, ok := readRequestBody(w, r, maxAdminBodyBytes)
+		if !ok {
+			return
+		}
 		if err := json.Unmarshal(body, &p); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "bad json"})
 			return
@@ -526,7 +533,10 @@ func handleAdminAPIKey(w http.ResponseWriter, r *http.Request) {
 		var p struct {
 			Key string `json:"key"`
 		}
-		body, _ := io.ReadAll(r.Body)
+		body, ok := readRequestBody(w, r, maxAdminBodyBytes)
+		if !ok {
+			return
+		}
 		if err := json.Unmarshal(body, &p); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "bad json"})
 			return
@@ -635,7 +645,11 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		})
 	case http.MethodPut:
 		var next RuntimeConfig
-		if err := json.NewDecoder(r.Body).Decode(&next); err != nil {
+		body, ok := readRequestBody(w, r, maxAdminBodyBytes)
+		if !ok {
+			return
+		}
+		if err := json.Unmarshal(body, &next); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "invalid JSON: " + err.Error()})
 			return
 		}

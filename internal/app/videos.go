@@ -35,8 +35,9 @@ var (
 	videoJobsMu sync.Mutex
 )
 
-func putVideoJob(j *videoJob) {
+func putVideoJob(j *videoJob) bool {
 	videoJobsMu.Lock()
+	defer videoJobsMu.Unlock()
 	// 顺手清掉 2 小时前的旧任务，别让内存里越堆越多。
 	cutoff := time.Now().Unix() - 2*3600
 	for id, old := range videoJobs {
@@ -44,14 +45,37 @@ func putVideoJob(j *videoJob) {
 			delete(videoJobs, id)
 		}
 	}
+	active := 0
+	oldestFinished := ""
+	var oldestTS int64
+	for id, old := range videoJobs {
+		if old.Status == "queued" || old.Status == "in_progress" {
+			active++
+		} else if oldestFinished == "" || old.CreatedAt < oldestTS {
+			oldestFinished, oldestTS = id, old.CreatedAt
+		}
+	}
+	if active >= 2 {
+		return false
+	}
+	if len(videoJobs) >= 8 {
+		if oldestFinished == "" {
+			return false
+		}
+		delete(videoJobs, oldestFinished)
+	}
 	videoJobs[j.ID] = j
-	videoJobsMu.Unlock()
+	return true
 }
 
 func getVideoJob(id string) *videoJob {
 	videoJobsMu.Lock()
 	defer videoJobsMu.Unlock()
-	return videoJobs[id]
+	if j := videoJobs[id]; j != nil {
+		copy := *j
+		return &copy
+	}
+	return nil
 }
 
 // handleCreateVideo 处理 POST /v1/videos。
@@ -61,7 +85,11 @@ func handleCreateVideo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, ok := readRequestBody(w, r, maxAdminBodyBytes)
+	if !ok {
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": map[string]string{"message": "bad json body"}})
 		return
 	}
@@ -89,9 +117,13 @@ func handleCreateVideo(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().Unix(),
 		Prompt:    prompt,
 	}
-	putVideoJob(j)
+	if !putVideoJob(j) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": map[string]string{"message": "video job capacity reached; retry later"}})
+		return
+	}
+	snapshot := *j
 	go runVideoJob(j)
-	writeJSON(w, 200, j)
+	writeJSON(w, 200, snapshot)
 }
 
 // runVideoJob 后台跑视频生成，结果写回 job。

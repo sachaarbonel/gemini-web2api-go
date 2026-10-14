@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -89,7 +88,10 @@ func handleAdminCookies(w http.ResponseWriter, r *http.Request) {
 			Cookie string `json:"cookie"`
 			Note   string `json:"note"`
 		}
-		body, _ := io.ReadAll(r.Body)
+		body, ok := readRequestBody(w, r, maxAdminBodyBytes)
+		if !ok {
+			return
+		}
 		if err := json.Unmarshal(body, &p); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "bad json"})
 			return
@@ -193,7 +195,10 @@ func handleAdminCookieItem(w http.ResponseWriter, r *http.Request) {
 			Note   *string `json:"note"`
 			Status *string `json:"status"`
 		}
-		body, _ := io.ReadAll(r.Body)
+		body, ok := readRequestBody(w, r, maxAdminBodyBytes)
+		if !ok {
+			return
+		}
 		if err := json.Unmarshal(body, &p); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "bad json"})
 			return

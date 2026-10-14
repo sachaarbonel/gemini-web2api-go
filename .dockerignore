@@ -1,0 +1,16 @@
+.git
+.agents
+.codex
+.aws
+.env*
+config.json
+config.local.json
+cookie.txt
+admin-token
+data
+*.db
+*.db-wal
+*.db-shm
+*.log
+gemini-web2api
+gemini-web2api-go

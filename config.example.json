@@ -1,6 +1,7 @@
 {
   "port": 8083,
-  "host": "0.0.0.0",
+  "host": "127.0.0.1",
+  "api_prefix": "",
   "db_path": "./data/gemini.db",
   "admin_enabled": true,
   "admin_token": "",

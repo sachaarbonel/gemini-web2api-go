@@ -9,6 +9,7 @@ import (
 type Config struct {
 	Port           int    `json:"port"`
 	Host           string `json:"host"`
+	APIPrefix      string `json:"api_prefix"`
 	RetryAttempts  int    `json:"retry_attempts"`
 	RetryDelaySec  int    `json:"retry_delay_sec"`
 	RequestTimeout int    `json:"request_timeout_sec"`
@@ -62,7 +63,7 @@ var (
 func defaultConfig() Config {
 	return Config{
 		Port:           8083,
-		Host:           "0.0.0.0",
+		Host:           "127.0.0.1",
 		RetryAttempts:  3,
 		RetryDelaySec:  2,
 		RequestTimeout: 180,

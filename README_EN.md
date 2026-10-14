@@ -1,5 +1,9 @@
 # gemini-web2api-go
 
+This checkout includes local security fixes. Build from this source to use them; upstream prebuilt binaries and images do not include these changes. The native server binds to `127.0.0.1` and always requires admin authentication. On first start it generates a random token in `data/admin-token` (owner-only permissions). Read that file locally to sign in. An explicit `ADMIN_TOKEN` or `--admin-token` must be at least 32 characters.
+
+Remote image/video inputs are limited to public HTTP(S) destinations on ports 80/443; private addresses and DNS rebinding are blocked. Input downloads carry no Google credentials. Google media downloads and redirects require exact approved HTTPS hosts. Requests and downloads have size limits. Cookies remain in the database, so protect the data directory and its backups.
+
 **Gemini web → OpenAI-compatible API.** A self-hosted proxy that turns the free [gemini.google.com](https://gemini.google.com) web app into `/v1/chat/completions` — **no Google API key, no paid quota**. Single Go binary, real Chrome TLS fingerprint, cookie pool with automatic renewal, proxy pool, built-in admin dashboard, SQLite / MySQL / PostgreSQL. Image, music, canvas and video generation (`/v1/videos`) included.
 
 <img src="docs/banner.svg" alt="gemini-web2api-go — Gemini web to OpenAI-compatible API proxy" width="100%">
@@ -65,15 +69,13 @@ This is not a wrapper around Google's official API ([generativelanguage.googleap
 
 ## Quick start
 
-### Prebuilt binary (simplest)
+### Binary built from this checkout
 
-Grab the one for your platform from
-[Releases](https://github.com/zexadev/gemini-web2api-go/releases). No Go, no Docker —
-the single file is the whole thing:
+Build the patched binary with Go 1.26.9 or later:
 
 ```bash
-chmod +x gemini-web2api-go_*
-./gemini-web2api-go_* --port 8083 --admin-token your-admin-token
+go build -o gemini-web2api-go .
+./gemini-web2api-go --port 8083
 ```
 
 Data lands in `./data/gemini.db` by default; pass `--db /your/path.db` to move it.
@@ -84,26 +86,25 @@ To use MySQL / PostgreSQL, just set the `SQL_DSN` env var (unset = SQLite, nothi
 # MySQL (also accepts the native go-sql-driver form user:pass@tcp(host:3306)/dbname)
 SQL_DSN="mysql://user:pass@host:3306/dbname"
 # PostgreSQL
-SQL_DSN="postgres://user:pass@host:5432/dbname?sslmode=disable"
+SQL_DSN="postgres://user:pass@host:5432/dbname?sslmode=verify-full"
 ```
 
 Tables are created automatically; all three backends share one schema. Single instance? Stick with the default SQLite. You only need MySQL/PG when several instances share one pool.
 
-### Docker (no source needed)
+### Docker (build the patched source)
 
 ```bash
+docker build -t gemini-web2api:local .
 docker run -d --name gemini-web2api \
   -p 127.0.0.1:8083:8083 \
-  -v "$PWD/data:/data" \
-  -e ADMIN_TOKEN=your-admin-token \
-  ghcr.io/zexadev/gemini-web2api-go:latest
+  -v gw2a-data:/data \
+  gemini-web2api:local
 ```
 
-For compose, just grab the file — no clone required:
+For Compose, run from this checkout:
 
 ```bash
-curl -O https://raw.githubusercontent.com/zexadev/gemini-web2api-go/main/docker-compose.yml
-ADMIN_TOKEN=your-admin-token docker compose up -d
+docker compose up -d --build
 ```
 
 ### From source
@@ -111,20 +112,17 @@ ADMIN_TOKEN=your-admin-token docker compose up -d
 If you have Go, skip Docker entirely:
 
 ```bash
-git clone https://github.com/zexadev/gemini-web2api-go
-cd gemini-web2api-go
 go build -o gemini-web2api-go .
-./gemini-web2api-go --port 8083 --admin-token your-admin-token
+./gemini-web2api-go --port 8083
 ```
 
-Changed the code and want it in a container? Uncomment the two `build:` lines in
-`docker-compose.yml`, then `docker compose up -d --build`.
+Changed the code? Rebuild with `docker compose up -d --build`.
 
 The startup banner:
 
 ```
 gemini-web2api-go v4.0.0
-  Listening:   http://0.0.0.0:8083
+  Listening:   http://127.0.0.1:8083
   Base URL:    http://localhost:8083/v1
   API key:     sk-gemini-XX...XXXX  (mutable in admin UI)
   Admin UI:    http://localhost:8083/admin  (token auth)
@@ -225,7 +223,9 @@ a specific URL's content — is not implemented yet).
 
 ## Admin panel
 
-`http://localhost:8083/admin`, log in with `--admin-token`.
+`http://localhost:8083/admin`, log in with the generated token from `data/admin-token`, or your explicitly configured token.
+
+The dashboard defaults to English, including settings, dialogs, status messages, and chart labels. Use the language button to switch between English and Chinese; your choice is remembered in this browser.
 
 - **Overview** — 24h KPIs, request volume / P50 latency dual-axis chart, per-model and per-proxy breakdowns, IP rate-limit usage, one-click connectivity check
 - **Requests** — request log (metadata only, no prompt/response content), status/model filters, pagination
@@ -375,9 +375,11 @@ All flags:
 | Flag | Notes |
 |---|---|
 | `--port` | listening port, default 8083 |
+| `--host` | listening address, default `127.0.0.1`; containers explicitly use `0.0.0.0` |
+| `--api-prefix` | optional API alias, e.g. `/google` adds `/google/v1/*` with the same API key and limits; admin and MCP routes are not mounted under this prefix |
 | `--config` | path to `config.json` |
 | `--db` | SQLite path, default `./data/gemini.db` |
-| `--admin-token` | panel login token; empty = no auth (only acceptable when bound to 127.0.0.1) |
+| `--admin-token` | panel login token (32+ characters); unset generates a private `admin-token` file beside the database |
 | `--api-key` | pins the `/v1/*` key so the panel can't change it, same as the `API_KEY` env var |
 | `--cookie-file` | imports the cookie in this file into the cookie pool at startup |
 | `--proxy` | imports this proxy into the proxy pool at startup |
@@ -560,7 +562,7 @@ docker-compose.yml         single container, pulls the ghcr image by default, sq
 | `gemini-3.1-pro` errors out immediately | It isn't exposed without a cookie, by design | Add an account on the Cookie pool page and it becomes available |
 | Every request returns 502 after attaching a cookie | The cookie expired, so the XSRF token can't be fetched | Re-export the cookie. Quick check: if `gemini-3.1-pro` reports 3.5 Flash-Lite, it's expired |
 | Cookie dies in about 30 minutes; keepalive does nothing | Chrome device-bound session; rotating `__Secure-1PSIDTS` returns 401 | Re-login in **Firefox** and export again. The panel Keep-alive button should report that `__Secure-1PSIDTS` was refreshed |
-| Panel won't open / 401 | `--admin-token` (or `ADMIN_TOKEN`) doesn't match | An empty token disables auth, which is only acceptable when bound to 127.0.0.1 |
+| Panel won't open / 401 | `--admin-token` (or `ADMIN_TOKEN`) doesn't match | If unset, use the generated token from the `admin-token` file beside the database |
 
 With Docker's default bridge network, upstream may return empty content (Google rejects certain NAT ranges). We have **never reproduced it here**. If you hit it, try `network_mode: host` to confirm whether that is the cause.
 

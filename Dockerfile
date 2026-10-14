@@ -4,7 +4,7 @@
 # --platform=$BUILDPLATFORM: builder 永远跑在构建机的原生架构上,靠 GOARCH 交叉
 # 编译出目标架构的二进制。多架构构建时如果让 builder 跟着目标平台走,arm64 那份
 # 会在 QEMU 里模拟编译,Go 编译是 CPU 密集型,慢一个数量级。
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine AS builder
 
 WORKDIR /src
 
@@ -48,4 +48,4 @@ EXPOSE 8083
 
 ENV DB_PATH=/data/gemini.db
 ENTRYPOINT ["/app/gemini-web2api"]
-CMD ["--db", "/data/gemini.db", "--port", "8083"]
+CMD ["--db", "/data/gemini.db", "--host", "0.0.0.0", "--port", "8083"]

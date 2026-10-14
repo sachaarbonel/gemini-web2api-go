@@ -106,7 +106,8 @@ func setAPIKey(k string) error {
 func requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := getAPIKey()
-		if key == "" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method == http.MethodOptions {
 			next(w, r)
 			return
 		}
@@ -117,7 +118,7 @@ func requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 		if got == "" {
 			got = strings.TrimSpace(r.Header.Get("x-api-key"))
 		}
-		if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(key)) != 1 {
+		if key == "" || got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(key)) != 1 {
 			writeJSON(w, 401, map[string]interface{}{
 				"error": map[string]string{
 					"message": "Invalid API key. Set Authorization: Bearer <key> or x-api-key header.",

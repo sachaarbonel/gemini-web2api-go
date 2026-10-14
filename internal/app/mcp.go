@@ -3,7 +3,6 @@ package app
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -69,9 +68,8 @@ func handleMCPHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
-	if err != nil {
-		writeMCPHTTPError(w, nil, -32700, "read error")
+	body, ok := readRequestBody(w, r, 8<<20)
+	if !ok {
 		return
 	}
 	var req rpcRequest

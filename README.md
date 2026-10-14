@@ -1,5 +1,9 @@
 # gemini-web2api-go
 
+本地安全加固版：请从本目录构建，上游预编译文件/镜像不包含这些修改。二进制默认只监听 `127.0.0.1`，管理面板始终需要鉴权。未配置 token 时自动生成到数据库旁的 `admin-token` 文件（默认 `data/admin-token`，仅服务用户可读），登录时使用该文件中的值。显式 `ADMIN_TOKEN` / `--admin-token` 至少 32 字符。Docker Compose 默认构建本地源码。
+
+远程图片/视频输入仅允许公共 HTTP(S) 地址和 80/443 端口，阻止内网地址与 DNS 重绑定；下载输入不携带 Google 凭证。带凭证的媒体下载和重定向仅允许明确列出的 Google HTTPS 主机。请求、附件和下载均有大小限制。Cookie 仍保存在数据库中，请保护数据目录及备份。
+
 **Gemini web → OpenAI-compatible API.** A self-hosted proxy that turns the free [gemini.google.com](https://gemini.google.com) web app into `/v1/chat/completions` — **no Google API key, no paid quota**. Single Go binary, real Chrome TLS fingerprint, cookie pool with automatic renewal, proxy pool, built-in admin dashboard, SQLite / MySQL / PostgreSQL. Image, music, canvas and video generation (`/v1/videos`) included.
 
 <img src="docs/banner.svg" alt="gemini-web2api-go — Gemini web to OpenAI-compatible API proxy" width="100%">
@@ -59,14 +63,13 @@
 
 ## 快速开始
 
-### 下载二进制（最省事）
+### 从本目录构建安全加固版
 
-[Releases](https://github.com/zexadev/gemini-web2api-go/releases) 里挑对应平台的下载，
-不用 Go、不用 Docker，单个文件就是全部：
+请使用 Go 1.26.9 或更新版本从本目录构建：
 
 ```bash
-chmod +x gemini-web2api-go_*
-./gemini-web2api-go_* --port 8083 --admin-token your-admin-token
+go build -o gemini-web2api-go .
+./gemini-web2api-go --port 8083
 ```
 
 数据默认落在 `./data/gemini.db`，换位置加 `--db /your/path.db`。
@@ -77,26 +80,25 @@ chmod +x gemini-web2api-go_*
 # MySQL（也接受 go-sql-driver 原生 user:pass@tcp(host:3306)/dbname）
 SQL_DSN="mysql://user:pass@host:3306/dbname"
 # PostgreSQL
-SQL_DSN="postgres://user:pass@host:5432/dbname?sslmode=disable"
+SQL_DSN="postgres://user:pass@host:5432/dbname?sslmode=verify-full"
 ```
 
 建表自动完成，三种库共用同一套 schema。单机就用默认 SQLite 最省事，多实例共享一个池子才需要 MySQL/PG。
 
-### Docker（不用源码）
+### Docker（构建本地源码）
 
 ```bash
+docker build -t gemini-web2api:local .
 docker run -d --name gemini-web2api \
   -p 127.0.0.1:8083:8083 \
-  -v "$PWD/data:/data" \
-  -e ADMIN_TOKEN=your-admin-token \
-  ghcr.io/zexadev/gemini-web2api-go:latest
+  -v gw2a-data:/data \
+  gemini-web2api:local
 ```
 
-用 compose 的话把 `docker-compose.yml` 单独下下来就行，也不用 clone：
+在本目录中运行 Compose：
 
 ```bash
-curl -O https://raw.githubusercontent.com/zexadev/gemini-web2api-go/main/docker-compose.yml
-ADMIN_TOKEN=your-admin-token docker compose up -d
+docker compose up -d --build
 ```
 
 ### 从源码跑
@@ -104,19 +106,17 @@ ADMIN_TOKEN=your-admin-token docker compose up -d
 装了 Go 就不必绕 Docker：
 
 ```bash
-git clone https://github.com/zexadev/gemini-web2api-go
-cd gemini-web2api-go
 go build -o gemini-web2api-go .
-./gemini-web2api-go --port 8083 --admin-token your-admin-token
+./gemini-web2api-go --port 8083
 ```
 
-改了代码想用容器跑，把 `docker-compose.yml` 里 `build:` 那两行的注释去掉，再 `docker compose up -d --build`。
+修改代码后运行 `docker compose up -d --build` 重新构建。
 
 启动后会看到 banner：
 
 ```
 gemini-web2api-go v4.0.0
-  Listening:   http://0.0.0.0:8083
+  Listening:   http://127.0.0.1:8083
   Base URL:    http://localhost:8083/v1
   API key:     sk-gemini-XX...XXXX  (mutable in admin UI)
   Admin UI:    http://localhost:8083/admin  (token auth)
@@ -219,7 +219,7 @@ Claude Code / Cursor 这类 MCP 客户端能「用 Gemini 去搜网」，返回*
 
 ## 管理面板
 
-`http://localhost:8083/admin`，用 `--admin-token` 登录。
+`http://localhost:8083/admin`，用 `data/admin-token` 中自动生成的 token 或显式配置的 token 登录。
 
 - **概览** — 24h KPI + 请求量/P50 延迟双轴趋势图 + 模型/代理分组统计 + IP 限流用量 + 一键连通性诊断
 - **请求记录** — 明细列表（仅元数据，无 prompt/response 内容），状态/模型筛选 + 分页
@@ -404,12 +404,14 @@ Cookie 池（按 URL、cookie 内容去重），之后一律从面板管理。�
 
 命令行参数全集：
 
+可用 `--api-prefix /google`（或配置 `"api_prefix": "/google"`）添加 `/google/v1/*` API 别名，沿用原 API key 和限流。该前缀不提供管理面板或 MCP 路由。
+
 | flag | 说明 |
 |---|---|
 | `--port` | 监听端口，默认 8083 |
 | `--config` | 指定 `config.json` 路径 |
 | `--db` | SQLite 路径，默认 `./data/gemini.db` |
-| `--admin-token` | 面板登录 token，留空 = 面板不鉴权（只有绑 127.0.0.1 才可接受） |
+| `--admin-token` | 面板登录 token（至少 32 字符）；留空时自动生成数据库旁的私有 `admin-token` 文件 |
 | `--api-key` | 锁定 `/v1/*` 的 key（面板改不了），等价于 `API_KEY` 环境变量 |
 | `--cookie-file` | 启动时把文件里的 cookie 导入 Cookie 池 |
 | `--proxy` | 启动时把这个代理导入代理池 |
@@ -630,7 +632,7 @@ docker-compose.yml         单容器，默认拉 ghcr 镜像，sqlite 挂 volume
 | 选 `gemini-3.1-pro` 直接报错 | 没配 cookie 时它不暴露，这是故意的 | 挂 cookie（面板「设置」或「Cookie 池」）后即可用 |
 | 挂了 cookie 后请求全部 502 | cookie 已失效，取不到 XSRF token | 重新导出 cookie。判据：请求 `gemini-3.1-pro` 若回报 3.5 Flash-Lite 就是失效了 |
 | cookie 大约半小时就失效，保活没用 | Chrome 设备绑定会话，`__Secure-1PSIDTS` 换发 401 | 用 **Firefox** 重新登录再导出；点面板「保活」应能看到刷新了 `__Secure-1PSIDTS` |
-| 面板打不开 / 401 | `--admin-token`（或 `ADMIN_TOKEN`）没对上 | token 留空则不鉴权，只有绑 127.0.0.1 时才可接受 |
+| 面板打不开 / 401 | `--admin-token`（或 `ADMIN_TOKEN`）没对上 | 未配置 token 时，请使用数据库旁的 `admin-token` 文件中的值 |
 
 Docker 用默认 bridge 网络时上游可能返回空内容（Google 拒绝某些 NAT 段）。本项目**没有复现过**，真遇到可以试 `network_mode: host` 验证是不是这个原因。
 
