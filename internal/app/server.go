@@ -323,8 +323,18 @@ func handleChatWith(w http.ResponseWriter, r *http.Request, generate chatGenerat
 	} else {
 		text, toolCalls, res, err = generate(prompt, latest, modelCfg, tools, images, onDelta, onReasoning)
 	}
-	if err == nil && !parallel && len(toolCalls) > 1 {
-		err = fmt.Errorf("upstream returned multiple tool calls with parallel_tool_calls disabled")
+	if err == nil {
+		if invalid := validateClientCalls(toolCalls, tools, req["tool_choice"], parallel); invalid != nil {
+			// Only regenerate a proposal: no client tool has run. Exactly one repair;
+			// network errors and a second invalid proposal are returned to the client.
+			recordRequest("chat.completions", modelName, prompt, "", res, 502, "invalid client-tool proposal: "+invalid.Error(), stream)
+			prompt = toolRepairPrompt(prompt, toolCalls, invalid)
+			text, toolCalls, res, err = generate(prompt, latest,
+				modelCfg, tools, images, nil, onReasoning)
+			if err == nil {
+				err = validateClientCalls(toolCalls, tools, req["tool_choice"], parallel)
+			}
+		}
 	}
 	if err == nil {
 		text, err = contract.validate(text, toolCalls)
