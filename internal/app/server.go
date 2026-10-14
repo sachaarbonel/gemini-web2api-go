@@ -213,7 +213,13 @@ func recordRequest(endpoint, model, prompt, response string, res *StreamResult, 
 	go insertRequest(r)
 }
 
+type chatGenerator func(string, string, ModelConfig, []map[string]interface{}, []pendingUpload, func(string), func(string)) (string, []ToolCall, *StreamResult, error)
+
 func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	handleChatWith(w, r, callGemini)
+}
+
+func handleChatWith(w http.ResponseWriter, r *http.Request, generate chatGenerator) {
 	body, ok := readRequestBody(w, r, maxAPIBodyBytes)
 	if !ok {
 		return
@@ -256,6 +262,14 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	contract, err := parseOutputContract(req["response_format"])
+	if err != nil {
+		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{"message": err.Error(), "type": "invalid_request_error"}})
+		return
+	}
+	messages = contract.messages(messages)
+	parallel, _ := req["parallel_tool_calls"].(bool)
+
 	// 图片先解出来带着，真正上传要等挑完账号和出口（见 streamGenerate）。
 	images, err := collectImages(messages, "")
 	if err != nil {
@@ -264,7 +278,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prompt, latest := messagesToPrompt(messages, tools, req["tool_choice"])
+	prompt, latest := messagesToPrompt(messages, tools, req["tool_choice"], parallel)
 	if strings.TrimSpace(prompt) == "" && len(images) == 0 {
 		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{"message": "empty prompt"}})
 		return
@@ -288,7 +302,10 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if stream {
 		sse = newSSEWriter(w, cid, created, modelName)
 		onReasoning = sse.SendReasoning
-		if len(tools) == 0 {
+		if contract != nil {
+			// Do not leak unvalidated JSON fragments as a successful answer.
+			onDelta = nil
+		} else if len(tools) == 0 {
 			onDelta = sse.SendContent
 		} else {
 			gate = newToolFenceGate(sse.SendContent)
@@ -299,11 +316,18 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var text string
 	var toolCalls []ToolCall
 	var res *StreamResult
-	if rtCfg().MultiTurn && len(images) == 0 && modelCfg.Tool == 0 {
-		// 多轮：按历史前缀识别续接，命中就只发新消息、历史留服务端。带 tools 也走这条。
+	if rtCfg().MultiTurn && len(images) == 0 && modelCfg.Tool == 0 && contract == nil && len(tools) == 0 {
+		// Tool/structured requests replay client history: cached web conversations do not key
+		// tool schemas, call IDs or output contracts and can reuse incompatible state.
 		text, toolCalls, res, err = callGeminiConv(messages, modelCfg, tools, req["tool_choice"], onDelta, onReasoning)
 	} else {
-		text, toolCalls, res, err = callGemini(prompt, latest, modelCfg, tools, images, onDelta, onReasoning)
+		text, toolCalls, res, err = generate(prompt, latest, modelCfg, tools, images, onDelta, onReasoning)
+	}
+	if err == nil && !parallel && len(toolCalls) > 1 {
+		err = fmt.Errorf("upstream returned multiple tool calls with parallel_tool_calls disabled")
+	}
+	if err == nil {
+		text, err = contract.validate(text, toolCalls)
 	}
 	if err != nil {
 		recordRequest("chat.completions", modelName, prompt, "", res, 502, err.Error(), stream)
@@ -363,7 +387,11 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		// 补尾巴要跟**实际发给客户端的内容**比。走了闸门时 res.Emitted 含围栏
 		// 原文，拿它比前缀会对不上，尾巴会整段丢掉。
-		if rest := remainingOf(text, sentText(res, gate)); rest != "" {
+		sent := sentText(res, gate)
+		if contract != nil {
+			sent = ""
+		}
+		if rest := remainingOf(text, sent); rest != "" {
 			sse.SendContent(rest)
 		}
 		if len(toolCalls) > 0 {

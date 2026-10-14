@@ -9,6 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.12.3
 	github.com/pkoukk/tiktoken-go v0.1.8
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	modernc.org/sqlite v1.51.0
 )
 
@@ -20,7 +21,7 @@ require (
 	github.com/bogdanfinn/quic-go-utls v1.0.9-utls // indirect
 	github.com/bogdanfinn/utls v1.7.7-barnius // indirect
 	github.com/bogdanfinn/websocket v1.5.5-barnius // indirect
-	github.com/dlclark/regexp2 v1.10.0 // indirect
+	github.com/dlclark/regexp2 v1.11.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

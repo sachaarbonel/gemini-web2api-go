@@ -46,8 +46,8 @@ type ToolCallFunction struct {
 // 出口才知道能不能做，所以判断放在 streamGenerate 里。最新那条消息单独返回，
 // 转附件时用来内联，好让模型不必去文件里找问题。
 func messagesToPrompt(messages []map[string]interface{}, tools []map[string]interface{},
-	toolChoice interface{}) (string, string) {
-	return buildPrompt(messages, tools, toolChoice), latestUserMessage(messages)
+	toolChoice interface{}, parallel ...bool) (string, string) {
+	return buildPrompt(messages, tools, toolChoice, parallel...), latestUserMessage(messages)
 }
 
 // latestUserMessage 取最后一条 user 消息的正文，没有则返回空串。
@@ -64,7 +64,7 @@ func latestUserMessage(messages []map[string]interface{}) string {
 }
 
 func buildPrompt(messages []map[string]interface{}, tools []map[string]interface{},
-	toolChoice interface{}) string {
+	toolChoice interface{}, parallel ...bool) string {
 	var parts []string
 
 	toolsInjected := false
@@ -113,6 +113,7 @@ func buildPrompt(messages []map[string]interface{}, tools []map[string]interface
 		}
 	}
 
+	callNames := map[string]string{}
 	for _, msg := range messages {
 		role := getStr(msg, "role")
 		content := contentToString(msg["content"])
@@ -130,11 +131,12 @@ func buildPrompt(messages []map[string]interface{}, tools []map[string]interface
 					}
 					fn, _ := tcMap["function"].(map[string]interface{})
 					name := getStr(fn, "name")
+					callNames[getStr(tcMap, "id")] = name
 					args := getStr(fn, "arguments")
 					if args == "" {
 						args = "{}"
 					}
-					tcStrs = append(tcStrs, fmt.Sprintf(
+					tcStrs = append(tcStrs, "[Tool call ID: "+getStr(tcMap, "id")+"]\n"+fmt.Sprintf(
 						"```tool_call\n{\"name\": \"%s\", \"arguments\": %s}\n```",
 						name, args,
 					))
@@ -144,7 +146,14 @@ func buildPrompt(messages []map[string]interface{}, tools []map[string]interface
 				parts = append(parts, "[Assistant]: "+content)
 			}
 		case "tool":
-			parts = append(parts, formatToolResult(getStr(msg, "name"), content))
+			name := getStr(msg, "name")
+			if name == "" {
+				name = callNames[getStr(msg, "tool_call_id")]
+			}
+			if id := getStr(msg, "tool_call_id"); id != "" {
+				name += " (call_id=" + id + ")"
+			}
+			parts = append(parts, formatToolResult(name, content))
 		default:
 			if content != "" {
 				parts = append(parts, content)
@@ -165,15 +174,16 @@ func buildPrompt(messages []map[string]interface{}, tools []map[string]interface
 	// 工具名（shell_command）0/4 抄假名 —— 示例教的是「动作」不是名字，故不必按客户端
 	// 动态生成 schema。
 	if toolsInjected {
+		callsRule := "Your reply is ONE tool_call block and nothing else. Do not output more than one tool_call. If several steps are needed, do the FIRST one now; you will be called again with its result."
+		if len(parallel) > 0 && parallel[0] {
+			callsRule = "You may emit multiple tool_call blocks in one turn for INDEPENDENT operations, one block per call. Wait for results before issuing dependent calls. The client executes every tool; do not invent their results."
+		}
 		parts = append(parts,
 			"[System instruction — highest priority]: To run a command or read a file you MUST "+
 				"output a ```tool_call``` block — this is the ONLY execution channel. A "+
 				"```powershell/```bash/```cmd/```python code block is NOT executed, it is only shown "+
 				"to the user; never use one to run anything, and never claim you lack tools.\n"+
-				"Act, do not explain: when the request needs a tool, your reply is ONE ```tool_call``` "+
-				"block and nothing else — do not list the commands you 'would' run, do not output more "+
-				"than one tool_call, do not add prose. If several steps are needed, do the FIRST one "+
-				"now; you will be called again with its result to continue.\n"+
+				"Act, do not explain: when the request needs a tool, emit tool_call blocks, not prose. "+callsRule+"\n"+
 				"Know when to STOP: once a tool result shows a step succeeded (for example it exited "+
 				"with code 0, even with no printed output), that step is DONE — do not run it again and "+
 				"do not retry the same thing a different way. When the whole request is accomplished, "+
