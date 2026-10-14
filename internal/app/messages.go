@@ -180,6 +180,8 @@ func buildPrompt(messages []map[string]interface{}, tools []map[string]interface
 		}
 		parts = append(parts,
 			"[System instruction — highest priority]: To run a command or read a file you MUST "+
+				"emit text for the EXTERNAL CLIENT to execute. These are not native web tools; "+
+				"a web tool allowance of zero does not disable this client protocol. "+
 				"output a ```tool_call``` block — this is the ONLY execution channel. A "+
 				"```powershell/```bash/```cmd/```python code block is NOT executed, it is only shown "+
 				"to the user; never use one to run anything, and never claim you lack tools.\n"+

@@ -36,3 +36,23 @@ Validation: offline Go tests exercise valid/invalid schema results, local versus
 external references, SDK-style tool history, serial/parallel contracts, streamed
 and nonstreamed responses and errors after streaming starts. No account cookies
 or paid upstream requests are needed for these regression tests.
+
+## Client tool argument validation and bounded correction
+
+The live Playcrank Builder trial exposed a proposal for `exec_command` without an
+argument object. The old parser serialized the absent map as `null`, returned a
+successful tool turn, and the Agents SDK stopped with a validation error before
+execution. Chat Completions now validates function names, argument objects and
+parameter schemas, `tool_choice`, and parallel-call limits before releasing calls.
+
+An invalid proposal receives **one** corrective generation with the same request,
+tool schemas and references. Nothing has executed on the client at that point.
+The correction never fills in missing command arguments or fabricates tool results.
+A second invalid proposal fails; transport failures are not retried by this path.
+Both upstream attempts are recorded in request metrics. Final-answer JSON validation
+still applies separately. Prompt guidance explicitly distinguishes the external
+client's text tool protocol from the web interface's native tool allowance.
+
+This does not repair tunnel/origin availability or guarantee successful code authoring.
+During the trial, small text requests succeeded while larger agent requests also
+received Cloudflare-origin 502 errors; those remain a separate operational diagnosis.
